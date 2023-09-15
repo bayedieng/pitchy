@@ -1,0 +1,5 @@
+/target
+__pycache__
+*.pth
+*.wav
+*.onnx
