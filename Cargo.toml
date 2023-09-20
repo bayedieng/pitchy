@@ -6,3 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+hound = "3.5.0"
+ndarray = { version = "0.15.6", features = ["matrixmultiply-threading"] }
+ort = "1.15.2"
+samplerate = "0.2.4"
