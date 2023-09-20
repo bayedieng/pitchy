@@ -1,10 +1,11 @@
-use std::vec;
-
 use hound::WavReader;
+
 use ndarray::{concatenate, prelude::*};
+
 use ort::environment::Environment;
 use ort::session::SessionBuilder;
 use ort::tensor::OrtOwnedTensor;
+
 use ort::{OrtResult, Value};
 use samplerate::{convert, ConverterType};
 
@@ -54,6 +55,7 @@ fn preprocess(audio_file_path: &str) -> Array2<f32> {
         &audio_samples,
     )
     .unwrap();
+
     let audio_ndarray =
         Array2::from_shape_vec((1, resampled_audio.len()), resampled_audio).unwrap();
     let array_padder = Array2::<f32>::zeros((1, WINDOW_SIZE / 2));
@@ -66,6 +68,7 @@ fn preprocess(audio_file_path: &str) -> Array2<f32> {
         ],
     )
     .unwrap();
+
     im2col(array_ndarray, (1, WINDOW_SIZE), (1, hop_length))
         .t()
         .to_owned()
