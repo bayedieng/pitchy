@@ -1,6 +1,8 @@
+use std::thread;
 use hound::WavReader;
 
 use ndarray::{concatenate, prelude::*};
+use ndarray_stats::QuantileExt;
 
 use ort::environment::Environment;
 use ort::session::SessionBuilder;
@@ -11,35 +13,52 @@ use samplerate::{convert, ConverterType};
 
 const MODEL_SAMPLE_RATE: u32 = 16000;
 const WINDOW_SIZE: usize = 1024;
+const CENTS_PER_BINS: f32 = 20.;
+const FMIN: f32 = 0.;
+const FMAX: f32 = 2006.;
 
 /// Equivalent of pytorch unfold function
-fn im2col(input: Array2<f32>, kernel_size: (usize, usize), stride: (usize, usize)) -> Array2<f32> {
+fn im2col(input: &Array2<f32>, kernel_height: usize, kernel_width: usize, stride_height: usize, stride_width: usize) -> Array2<f32> {
     let (input_height, input_width) = input.dim();
-    let (kernel_height, kernel_width) = kernel_size;
-    let (stride_height, stride_width) = stride;
-    let col_height = (input_height - kernel_height) / stride_height + 1;
-    let col_width = (input_width - kernel_width) / stride_width + 1;
+    
+    // Calculate the output dimensions
+    let output_height = (input_height - kernel_height) / stride_height + 1;
+    let output_width = (input_width - kernel_width) / stride_width + 1;
 
-    let mut col_matrix = Array::zeros((kernel_height * kernel_width, col_height * col_width));
+    // Create a new array to store the columns
+    let mut cols = Array2::zeros((kernel_height * kernel_width, output_height * output_width));
+    for i in 0..output_height {
+        for j in 0..output_width {
+            let start_row = i * stride_height;
+            let start_col = j * stride_width;
+            let end_row = start_row + kernel_height;
+            let end_col = start_col + kernel_width;
 
-    for i in 0..col_height {
-        for j in 0..col_width {
-            let start_x = i * stride_height;
-            let start_y = j * stride_width;
-            let end_x = start_x + kernel_height;
-            let end_y = start_y + kernel_width;
+            // Slice the input to get the current window
+            let window = input.slice(s![
+                start_row..end_row,
+                start_col..end_col,
+            ])
+            .into_shape(1024)
+            .unwrap();
 
-            let col_slice = col_matrix.slice_mut(s![.., i * col_width + j]).to_owned();
-            let col_slice_len = col_slice.dim();
-            let mut col_slice = col_slice.into_shape((1, col_slice_len)).unwrap();
-            col_slice.assign(&input.slice(s![start_x..end_x, start_y..end_y]));
+
+            // Assign the window to the corresponding column
+            cols.slice_mut(s![.., i * output_width + j]).assign(&window);
+
         }
     }
-    col_matrix
+    cols
+}
+
+
+struct ModelInput {
+    pub array: Array2<f32>,
+    time_hop: usize
 }
 
 /// default settings of torchcrepe preprocess function
-fn preprocess(audio_file_path: &str) -> Array2<f32> {
+fn preprocess(audio_file_path: &str) -> ModelInput{
     let reader = WavReader::open(audio_file_path).unwrap();
     let spec = reader.spec();
     let hop_length = MODEL_SAMPLE_RATE as usize / 100;
@@ -69,9 +88,51 @@ fn preprocess(audio_file_path: &str) -> Array2<f32> {
     )
     .unwrap();
 
-    im2col(array_ndarray, (1, WINDOW_SIZE), (1, hop_length))
+    let ret_array = im2col(&array_ndarray, 1, WINDOW_SIZE, 1, hop_length)
         .t()
-        .to_owned()
+        .to_owned();
+    println!("{}", &ret_array);
+    ModelInput { array: ret_array.clone(), time_hop: ret_array.view().shape()[0] }
+}
+
+enum QuantizeType {
+    Floor,
+    Ceil
+}
+
+fn cents_to_bins(cents: f32, quantize_type: QuantizeType) -> f32 {
+    let bins = (cents - 1997.3794084376191) / CENTS_PER_BINS;
+    match quantize_type {
+        QuantizeType::Ceil => bins.ceil(),
+        QuantizeType::Floor => bins.floor()
+    }
+
+}
+
+fn frequency_to_cents(frequency: f32) -> f32 {
+    1200. * (frequency / 10.).log2()
+}
+
+fn cents_to_frequency(cents: f32) -> f32 {
+    10. * 2.0f32.powf(cents / 1200.0)
+}
+
+fn frequency_to_bins(frequency: f32, quantize_type: QuantizeType) -> f32 {
+    cents_to_bins(frequency_to_cents(frequency), quantize_type)
+}
+fn bins_to_cents(bins: f32) -> f32 {
+    CENTS_PER_BINS * bins + 1997.3794084376191
+}
+
+fn bins_to_frequency(bins: f32) -> f32 {
+    cents_to_frequency(bins_to_cents(bins))
+}
+
+fn postprocess(logits: &mut Array2<f32>) -> f32 {
+    let (yi, bins) = logits.argmax().unwrap();
+    println!("{bins} {yi}");
+    bins_to_frequency(bins as f32)
+    
 }
 
 fn main() -> OrtResult<()> {
@@ -81,17 +142,24 @@ fn main() -> OrtResult<()> {
         .build()?
         .into_arc();
 
+    let n_threads = thread::available_parallelism().unwrap().get() / 2;
+ 
     let session = SessionBuilder::new(&environment)?
         .with_optimization_level(ort::GraphOptimizationLevel::Level1)?
-        .with_intra_threads(4)?
+        .with_intra_threads(n_threads as i16)?
         .with_model_from_file("crepe.onnx")?;
 
-    let input_data = preprocess("c_note.wav");
-    print!("{:?}", &input_data.shape());
-    let cow_array = CowArray::from(input_data).into_dyn();
+    let input_data = preprocess("a_note.wav");
+    let cow_array = CowArray::from(input_data.array).into_dyn();
     let value = Value::from_array(session.allocator(), &cow_array)?;
     let infer = session.run(vec![value])?;
+    
     let y: OrtOwnedTensor<f32, _> = infer[0].try_extract()?;
-
+    let y_slice = y.view().as_slice().unwrap().to_vec();
+    let mut post_array = Array2::from_shape_vec((input_data.time_hop, 360), y_slice).unwrap();
+    let pitch = postprocess(&mut post_array);
+    println!("{pitch}");
+    
     Ok(())
+
 }

@@ -8,5 +8,6 @@ edition = "2021"
 [dependencies]
 hound = "3.5.0"
 ndarray = { version = "0.15.6", features = ["matrixmultiply-threading"] }
+ndarray-stats = "0.5.1"
 ort = "1.15.2"
 samplerate = "0.2.4"
