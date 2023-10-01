@@ -14,8 +14,6 @@ use samplerate::{convert, ConverterType};
 const MODEL_SAMPLE_RATE: u32 = 16000;
 const WINDOW_SIZE: usize = 1024;
 const CENTS_PER_BINS: f32 = 20.;
-const FMIN: f32 = 0.;
-const FMAX: f32 = 2006.;
 
 /// Equivalent of pytorch unfold function
 fn im2col(input: &Array2<f32>, kernel_height: usize, kernel_width: usize, stride_height: usize, stride_width: usize) -> Array2<f32> {
@@ -91,35 +89,13 @@ fn preprocess(audio_file_path: &str) -> ModelInput{
     let ret_array = im2col(&array_ndarray, 1, WINDOW_SIZE, 1, hop_length)
         .t()
         .to_owned();
-    println!("{}", &ret_array);
     ModelInput { array: ret_array.clone(), time_hop: ret_array.view().shape()[0] }
-}
-
-enum QuantizeType {
-    Floor,
-    Ceil
-}
-
-fn cents_to_bins(cents: f32, quantize_type: QuantizeType) -> f32 {
-    let bins = (cents - 1997.3794084376191) / CENTS_PER_BINS;
-    match quantize_type {
-        QuantizeType::Ceil => bins.ceil(),
-        QuantizeType::Floor => bins.floor()
-    }
-
-}
-
-fn frequency_to_cents(frequency: f32) -> f32 {
-    1200. * (frequency / 10.).log2()
 }
 
 fn cents_to_frequency(cents: f32) -> f32 {
     10. * 2.0f32.powf(cents / 1200.0)
 }
 
-fn frequency_to_bins(frequency: f32, quantize_type: QuantizeType) -> f32 {
-    cents_to_bins(frequency_to_cents(frequency), quantize_type)
-}
 fn bins_to_cents(bins: f32) -> f32 {
     CENTS_PER_BINS * bins + 1997.3794084376191
 }
@@ -129,8 +105,7 @@ fn bins_to_frequency(bins: f32) -> f32 {
 }
 
 fn postprocess(logits: &mut Array2<f32>) -> f32 {
-    let (yi, bins) = logits.argmax().unwrap();
-    println!("{bins} {yi}");
+    let (_, bins) = logits.argmax().unwrap();
     bins_to_frequency(bins as f32)
     
 }
@@ -149,7 +124,7 @@ fn main() -> OrtResult<()> {
         .with_intra_threads(n_threads as i16)?
         .with_model_from_file("crepe.onnx")?;
 
-    let input_data = preprocess("a_note.wav");
+    let input_data = preprocess("c_note.wav");
     let cow_array = CowArray::from(input_data.array).into_dyn();
     let value = Value::from_array(session.allocator(), &cow_array)?;
     let infer = session.run(vec![value])?;
